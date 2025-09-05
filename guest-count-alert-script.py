@@ -207,23 +207,31 @@ class GuestCountChecker:
         
         return start_time, end_time
     
-    def _load_alerted_orders(self) -> set:
-        """Load the set of order numbers that have already been alerted about"""
+    def _load_alerted_orders(self) -> dict:
+        """Load the dictionary of order numbers with timestamps that have already been alerted about"""
         try:
             if os.path.exists(self.alerted_orders_file):
                 with open(self.alerted_orders_file, 'rb') as f:
                     alerted_orders = pickle.load(f)
+                
+                # Handle migration from old set format to new dict format
+                if isinstance(alerted_orders, set):
+                    # Convert old set to new dict format with current timestamp
+                    current_time = datetime.now(timezone.utc)
+                    alerted_orders = {order_num: current_time for order_num in alerted_orders}
+                    logger.info(f"Migrated {len(alerted_orders)} orders from old format to new format")
+                
                 logger.info(f"Loaded {len(alerted_orders)} previously alerted orders")
                 return alerted_orders
             else:
                 logger.info("No previously alerted orders found")
-                return set()
+                return {}
         except Exception as e:
             logger.warning(f"Could not load alerted orders: {e}")
-            return set()
+            return {}
     
-    def _save_alerted_orders(self, alerted_orders: set):
-        """Save the set of order numbers that have been alerted about"""
+    def _save_alerted_orders(self, alerted_orders: dict):
+        """Save the dictionary of order numbers with timestamps that have been alerted about"""
         try:
             with open(self.alerted_orders_file, 'wb') as f:
                 pickle.dump(alerted_orders, f)
@@ -231,28 +239,31 @@ class GuestCountChecker:
         except Exception as e:
             logger.warning(f"Could not save alerted orders: {e}")
     
-    def _cleanup_old_alerted_orders(self, alerted_orders: set, max_age_hours: int = 24) -> set:
+    def _cleanup_old_alerted_orders(self, alerted_orders: dict, max_age_hours: int = 48) -> dict:
         """
         Clean up old alerted orders to prevent the file from growing indefinitely.
-        Removes orders that are older than max_age_hours.
+        Removes orders that are older than max_age_hours (default 48 hours).
         """
         try:
             # Get current time
             current_time = datetime.now(timezone.utc)
             max_age = timedelta(hours=max_age_hours)
             
-            # We'll keep all orders for now since we don't have order timestamps in the set
-            # In a more sophisticated implementation, we could store order numbers with timestamps
-            # For now, we'll limit the total number of stored orders
-            max_orders = 1000
+            # Filter out orders older than max_age_hours
+            cleaned_orders = {}
+            removed_count = 0
             
-            if len(alerted_orders) > max_orders:
-                # Convert to list, keep the most recent ones (this is a simple approach)
-                # In practice, we'd want to store timestamps with order numbers
-                alerted_orders = set(list(alerted_orders)[-max_orders:])
-                logger.info(f"Cleaned up alerted orders, keeping {len(alerted_orders)} most recent")
+            for order_number, alert_time in alerted_orders.items():
+                if current_time - alert_time <= max_age:
+                    cleaned_orders[order_number] = alert_time
+                else:
+                    removed_count += 1
             
-            return alerted_orders
+            if removed_count > 0:
+                logger.info(f"Cleaned up {removed_count} old alerted orders (older than {max_age_hours} hours)")
+                logger.info(f"Kept {len(cleaned_orders)} recent alerted orders")
+            
+            return cleaned_orders
             
         except Exception as e:
             logger.warning(f"Could not cleanup old alerted orders: {e}")
@@ -356,7 +367,7 @@ class GuestCountChecker:
                     pass
             return []
     
-    def check_order_for_alert(self, order: Dict, alerted_orders: set) -> Optional[Dict]:
+    def check_order_for_alert(self, order: Dict, alerted_orders: dict) -> Optional[Dict]:
         """
         Check if an order should trigger an alert
         Returns alert info if alert should be sent, None otherwise
@@ -371,7 +382,8 @@ class GuestCountChecker:
         
         # Check if we've already alerted about this order
         if order_number in alerted_orders:
-            logger.info(f"Order {order_number} already alerted about, skipping")
+            alert_time = alerted_orders[order_number]
+            logger.info(f"Order {order_number} already alerted about at {alert_time.isoformat()}, skipping")
             return None
         # Check if order has guest count products - return None if it does
         items = order.get('items', [])
@@ -632,7 +644,7 @@ class GuestCountChecker:
         
         # Check each order
         alerts_sent = 0
-        new_alerted_orders = set()
+        new_alerted_orders = {}
         for order in orders:
             # Debug: Show details about each order found
             order_number = order.get('orderNumber', 'Unknown')
@@ -697,8 +709,9 @@ class GuestCountChecker:
                     alert_type = alert_info.get('alert_type', 'unknown')
                     logger.info(f"Alert sent for order {alert_info['order_number']} - Alert type: {alert_type}")
                     
-                    # Add this order to the alerted orders set
-                    new_alerted_orders.add(alert_info['order_number'])
+                    # Add this order to the alerted orders dict with current timestamp
+                    current_time = datetime.now(timezone.utc)
+                    new_alerted_orders[alert_info['order_number']] = current_time
             else:
                 if not has_guest_count and tasting_products_found:
                     logger.warning(f"Order {order_number} has missing guest count and tasting products but no alert was sent!")
