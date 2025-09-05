@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
 Guest Count Check Alert Script
-Checks Commerce7 orders from the last 15 minutes for missing guest counts
-and sends email/SMS alerts to managers
+Checks Commerce7 orders from the last run time for missing guest counts
+and sends email/SMS alerts to managers. Uses dynamic time windows based
+on the last successful run to handle irregular GitHub Actions scheduling.
 """
 
 import os
@@ -15,6 +16,7 @@ from email.mime.multipart import MIMEMultipart
 from typing import Dict, List, Optional
 import logging
 import pytz
+import pickle
 
 # Third-party imports
 import requests
@@ -67,6 +69,9 @@ class GuestCountChecker:
         
         # Collection ID for monitoring orders with collection products plus other items
         self.collection_id = 'fd8828cc-4804-4662-9a77-3b1dae21b00b'
+        
+        # Last run tracking
+        self.last_run_file = 'last_run_timestamp.pkl'
         
         # Validate configuration
         self._validate_config()
@@ -146,15 +151,67 @@ class GuestCountChecker:
             logger.warning(f"Could not convert datetime '{utc_datetime_str}': {e}")
             return utc_datetime_str  # Return original if conversion fails
     
-    def get_recent_orders(self, minutes: int = 15) -> List[Dict]:
+    def _save_last_run_timestamp(self, timestamp: datetime):
+        """Save the last run timestamp to a file"""
+        try:
+            with open(self.last_run_file, 'wb') as f:
+                pickle.dump(timestamp, f)
+            logger.info(f"Saved last run timestamp: {timestamp.isoformat()}")
+        except Exception as e:
+            logger.warning(f"Could not save last run timestamp: {e}")
+    
+    def _load_last_run_timestamp(self) -> Optional[datetime]:
+        """Load the last run timestamp from a file"""
+        try:
+            if os.path.exists(self.last_run_file):
+                with open(self.last_run_file, 'rb') as f:
+                    timestamp = pickle.load(f)
+                logger.info(f"Loaded last run timestamp: {timestamp.isoformat()}")
+                return timestamp
+            else:
+                logger.info("No previous run timestamp found")
+                return None
+        except Exception as e:
+            logger.warning(f"Could not load last run timestamp: {e}")
+            return None
+    
+    def _get_time_window_for_orders(self) -> tuple[datetime, datetime]:
         """
-        Fetch orders from Commerce7 from the last N minutes
+        Get the time window for fetching orders.
+        Returns (start_time, end_time) where start_time is either:
+        - The last run timestamp (if available)
+        - 15 minutes ago (fallback)
+        """
+        end_time = datetime.now(timezone.utc)
+        last_run = self._load_last_run_timestamp()
+        
+        if last_run:
+            # Use the last run time as start time
+            start_time = last_run
+            time_diff = end_time - start_time
+            
+            # Safety check: if it's been more than 2 hours since last run, limit to 2 hours
+            max_window_hours = 2
+            if time_diff > timedelta(hours=max_window_hours):
+                start_time = end_time - timedelta(hours=max_window_hours)
+                logger.warning(f"Last run was {time_diff.total_seconds()/3600:.1f} hours ago, limiting window to {max_window_hours} hours")
+            else:
+                logger.info(f"Using dynamic time window: {time_diff.total_seconds()/60:.1f} minutes since last run")
+        else:
+            # Fallback to 15 minutes if no previous run
+            start_time = end_time - timedelta(minutes=15)
+            logger.info("No previous run found, using 15-minute fallback window")
+        
+        return start_time, end_time
+    
+    def get_recent_orders(self, minutes: int = None) -> List[Dict]:
+        """
+        Fetch orders from Commerce7 using dynamic time window based on last run
         Since Commerce7 API only supports date-level filtering, we'll get recent orders
         and filter by timestamp in the application
         """
-        # Calculate time range
-        end_time = datetime.now(timezone.utc)
-        start_time = end_time - timedelta(minutes=minutes)
+        # Get dynamic time window
+        start_time, end_time = self._get_time_window_for_orders()
         
         # Since Commerce7 API doesn't support minute-level filtering,
         # we'll get orders from recent days and filter by timestamp
@@ -164,7 +221,8 @@ class GuestCountChecker:
         # Get orders from September 3rd onwards (test script confirmed this works)
         search_date = '2025-09-03'
         
-        logger.info(f"Checking orders from {search_date} onwards (will filter to last {minutes} minutes)")
+        time_diff_minutes = (end_time - start_time).total_seconds() / 60
+        logger.info(f"Checking orders from {search_date} onwards (will filter to last {time_diff_minutes:.1f} minutes)")
         
         # Build API URL with date filter
         base_url = 'https://api.commerce7.com/v1/order'
@@ -228,7 +286,8 @@ class GuestCountChecker:
                     logger.warning(f"Could not parse order date '{order_date_str}': {e}")
                     continue
             
-            logger.info(f"Filtered to {len(recent_orders)} orders from the last {minutes} minutes")
+            time_diff_minutes = (end_time - start_time).total_seconds() / 60
+            logger.info(f"Filtered to {len(recent_orders)} orders from the last {time_diff_minutes:.1f} minutes")
             return recent_orders
             
         except requests.exceptions.RequestException as e:
@@ -498,11 +557,11 @@ class GuestCountChecker:
             logger.error("Basic API connection failed, aborting")
             return
         
-        # Get recent orders
-        orders = self.get_recent_orders(minutes=15)
+        # Get recent orders using dynamic time window
+        orders = self.get_recent_orders()
         
         if not orders:
-            logger.info("No orders found in the last 15 minutes")
+            logger.info("No orders found in the time window since last run")
             return
         
         # Check each order
@@ -583,6 +642,10 @@ class GuestCountChecker:
                     logger.info(f"Order {order_number} has collection products but only {total_quantity} total quantity (need 3+), no alert needed")
         
         logger.info(f"Check complete. {alerts_sent} alerts sent.")
+        
+        # Save the current run timestamp for next time
+        current_time = datetime.now(timezone.utc)
+        self._save_last_run_timestamp(current_time)
 
 
 def main():
