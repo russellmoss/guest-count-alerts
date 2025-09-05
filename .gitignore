@@ -104,3 +104,7 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# Runtime files
+last_run_timestamp.pkl
+alerted_orders.pkl

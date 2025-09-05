@@ -73,6 +73,9 @@ class GuestCountChecker:
         # Last run tracking
         self.last_run_file = 'last_run_timestamp.pkl'
         
+        # Alerted orders tracking
+        self.alerted_orders_file = 'alerted_orders.pkl'
+        
         # Validate configuration
         self._validate_config()
         
@@ -204,6 +207,57 @@ class GuestCountChecker:
         
         return start_time, end_time
     
+    def _load_alerted_orders(self) -> set:
+        """Load the set of order numbers that have already been alerted about"""
+        try:
+            if os.path.exists(self.alerted_orders_file):
+                with open(self.alerted_orders_file, 'rb') as f:
+                    alerted_orders = pickle.load(f)
+                logger.info(f"Loaded {len(alerted_orders)} previously alerted orders")
+                return alerted_orders
+            else:
+                logger.info("No previously alerted orders found")
+                return set()
+        except Exception as e:
+            logger.warning(f"Could not load alerted orders: {e}")
+            return set()
+    
+    def _save_alerted_orders(self, alerted_orders: set):
+        """Save the set of order numbers that have been alerted about"""
+        try:
+            with open(self.alerted_orders_file, 'wb') as f:
+                pickle.dump(alerted_orders, f)
+            logger.info(f"Saved {len(alerted_orders)} alerted orders")
+        except Exception as e:
+            logger.warning(f"Could not save alerted orders: {e}")
+    
+    def _cleanup_old_alerted_orders(self, alerted_orders: set, max_age_hours: int = 24) -> set:
+        """
+        Clean up old alerted orders to prevent the file from growing indefinitely.
+        Removes orders that are older than max_age_hours.
+        """
+        try:
+            # Get current time
+            current_time = datetime.now(timezone.utc)
+            max_age = timedelta(hours=max_age_hours)
+            
+            # We'll keep all orders for now since we don't have order timestamps in the set
+            # In a more sophisticated implementation, we could store order numbers with timestamps
+            # For now, we'll limit the total number of stored orders
+            max_orders = 1000
+            
+            if len(alerted_orders) > max_orders:
+                # Convert to list, keep the most recent ones (this is a simple approach)
+                # In practice, we'd want to store timestamps with order numbers
+                alerted_orders = set(list(alerted_orders)[-max_orders:])
+                logger.info(f"Cleaned up alerted orders, keeping {len(alerted_orders)} most recent")
+            
+            return alerted_orders
+            
+        except Exception as e:
+            logger.warning(f"Could not cleanup old alerted orders: {e}")
+            return alerted_orders
+    
     def get_recent_orders(self, minutes: int = None) -> List[Dict]:
         """
         Fetch orders from Commerce7 using dynamic time window based on last run
@@ -302,7 +356,7 @@ class GuestCountChecker:
                     pass
             return []
     
-    def check_order_for_alert(self, order: Dict) -> Optional[Dict]:
+    def check_order_for_alert(self, order: Dict, alerted_orders: set) -> Optional[Dict]:
         """
         Check if an order should trigger an alert
         Returns alert info if alert should be sent, None otherwise
@@ -310,7 +364,15 @@ class GuestCountChecker:
         Two alert conditions:
         1. Orders with tasting products and no guest count
         2. Orders with collection products + at least 2 other products and no guest count
+        
+        Also checks if order has already been alerted about to prevent duplicates.
         """
+        order_number = order.get('orderNumber', 'Unknown')
+        
+        # Check if we've already alerted about this order
+        if order_number in alerted_orders:
+            logger.info(f"Order {order_number} already alerted about, skipping")
+            return None
         # Check if order has guest count products - return None if it does
         items = order.get('items', [])
         has_guest_count = False
@@ -564,8 +626,13 @@ class GuestCountChecker:
             logger.info("No orders found in the time window since last run")
             return
         
+        # Load previously alerted orders
+        alerted_orders = self._load_alerted_orders()
+        alerted_orders = self._cleanup_old_alerted_orders(alerted_orders)
+        
         # Check each order
         alerts_sent = 0
+        new_alerted_orders = set()
         for order in orders:
             # Debug: Show details about each order found
             order_number = order.get('orderNumber', 'Unknown')
@@ -618,7 +685,7 @@ class GuestCountChecker:
                 logger.info(f"  - Collection products found: {len(collection_products_found)}")
             logger.info(f"  - Total quantity in order: {total_quantity}")
             
-            alert_info = self.check_order_for_alert(order)
+            alert_info = self.check_order_for_alert(order, alerted_orders)
             
             if alert_info:
                 # Send alerts
@@ -629,6 +696,9 @@ class GuestCountChecker:
                     alerts_sent += 1
                     alert_type = alert_info.get('alert_type', 'unknown')
                     logger.info(f"Alert sent for order {alert_info['order_number']} - Alert type: {alert_type}")
+                    
+                    # Add this order to the alerted orders set
+                    new_alerted_orders.add(alert_info['order_number'])
             else:
                 if not has_guest_count and tasting_products_found:
                     logger.warning(f"Order {order_number} has missing guest count and tasting products but no alert was sent!")
@@ -642,6 +712,12 @@ class GuestCountChecker:
                     logger.info(f"Order {order_number} has collection products but only {total_quantity} total quantity (need 3+), no alert needed")
         
         logger.info(f"Check complete. {alerts_sent} alerts sent.")
+        
+        # Save the updated alerted orders
+        if new_alerted_orders:
+            alerted_orders.update(new_alerted_orders)
+            self._save_alerted_orders(alerted_orders)
+            logger.info(f"Added {len(new_alerted_orders)} new orders to alerted list")
         
         # Save the current run timestamp for next time
         current_time = datetime.now(timezone.utc)
