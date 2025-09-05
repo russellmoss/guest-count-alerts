@@ -58,6 +58,13 @@ class GuestCountChecker:
             'ffa635a6-9038-4360-a532-96b539006400'
         ]
         
+        # Guest count product IDs - these indicate the order HAS a guest count
+        self.guest_count_product_ids = [
+            '718b9fbb-4e23-48c7-8b2d-da86d2624b36',  # trade guest
+            '7a5d9556-33e4-4d97-a3e8-37adefc6dcf0',  # non-club member
+            '75d4f6cf-cf69-4e76-8f3b-bb35cc7ddeb3'   # club member
+        ]
+        
         # Collection ID for monitoring orders with collection products plus other items
         self.collection_id = 'fd8828cc-4804-4662-9a77-3b1dae21b00b'
         
@@ -245,11 +252,18 @@ class GuestCountChecker:
         1. Orders with tasting products and no guest count
         2. Orders with collection products + at least 2 other products and no guest count
         """
-        # Check if order has guest count - return None if it does
-        if order.get('guestCount'):
+        # Check if order has guest count products - return None if it does
+        items = order.get('items', [])
+        has_guest_count = False
+        for item in items:
+            product_id = item.get('productId', '')
+            if product_id in self.guest_count_product_ids:
+                has_guest_count = True
+                break
+        
+        if has_guest_count:
             return None
         
-        items = order.get('items', [])
         total_items = len(items)  # Number of different products
         total_quantity = sum(item.get('quantity', 1) for item in items)  # Total quantity of all items
         
@@ -496,12 +510,22 @@ class GuestCountChecker:
         for order in orders:
             # Debug: Show details about each order found
             order_number = order.get('orderNumber', 'Unknown')
-            guest_count = order.get('guestCount', 'MISSING')
             associate = order.get('salesAssociate', {}).get('name', 'Unknown')
             items = order.get('items', [])
             
+            # Check for guest count products
+            has_guest_count = False
+            guest_count_products = []
+            for item in items:
+                product_id = item.get('productId', '')
+                if product_id in self.guest_count_product_ids:
+                    has_guest_count = True
+                    guest_count_products.append(item.get('productTitle', item.get('productName', 'Unknown')))
+            
+            guest_count_status = f"FOUND ({', '.join(guest_count_products)})" if has_guest_count else "MISSING"
+            
             logger.info(f"Checking order {order_number}:")
-            logger.info(f"  - Guest Count: {guest_count}")
+            logger.info(f"  - Guest Count: {guest_count_status}")
             logger.info(f"  - Sales Associate: {associate}")
             total_quantity = sum(item.get('quantity', 1) for item in items)
             logger.info(f"  - Items: {len(items)} different products, {total_quantity} total quantity")
@@ -547,12 +571,12 @@ class GuestCountChecker:
                     alert_type = alert_info.get('alert_type', 'unknown')
                     logger.info(f"Alert sent for order {alert_info['order_number']} - Alert type: {alert_type}")
             else:
-                if guest_count == 'MISSING' and tasting_products_found:
+                if not has_guest_count and tasting_products_found:
                     logger.warning(f"Order {order_number} has missing guest count and tasting products but no alert was sent!")
-                elif guest_count == 'MISSING' and collection_products_found and total_quantity >= 3:
+                elif not has_guest_count and collection_products_found and total_quantity >= 3:
                     logger.warning(f"Order {order_number} has missing guest count, collection products, and {total_quantity} total quantity but no alert was sent!")
-                elif guest_count != 'MISSING':
-                    logger.info(f"Order {order_number} has guest count ({guest_count}), no alert needed")
+                elif has_guest_count:
+                    logger.info(f"Order {order_number} has guest count ({', '.join(guest_count_products)}), no alert needed")
                 elif not tasting_products_found and not collection_products_found:
                     logger.info(f"Order {order_number} has no monitored products, no alert needed")
                 elif collection_products_found and total_quantity < 3:
