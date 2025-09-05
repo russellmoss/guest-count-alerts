@@ -58,6 +58,9 @@ class GuestCountChecker:
             'ffa635a6-9038-4360-a532-96b539006400'
         ]
         
+        # Collection ID for monitoring orders with collection products plus other items
+        self.collection_id = 'fd8828cc-4804-4662-9a77-3b1dae21b00b'
+        
         # Validate configuration
         self._validate_config()
         
@@ -237,37 +240,74 @@ class GuestCountChecker:
         """
         Check if an order should trigger an alert
         Returns alert info if alert should be sent, None otherwise
+        
+        Two alert conditions:
+        1. Orders with tasting products and no guest count
+        2. Orders with collection products + at least 2 other products and no guest count
         """
-        # Check if order has guest count
+        # Check if order has guest count - return None if it does
         if order.get('guestCount'):
             return None
         
-        # Check if order contains any of the tasting products
         items = order.get('items', [])
+        total_items = len(items)  # Number of different products
+        total_quantity = sum(item.get('quantity', 1) for item in items)  # Total quantity of all items
+        
+        # Check for tasting products condition
         has_tasting_product = False
-        product_names = []
+        tasting_product_names = []
+        
+        # Check for collection condition
+        has_collection_product = False
+        collection_product_names = []
         
         for item in items:
             product_id = item.get('productId', '')
+            product_name = item.get('productTitle', item.get('productName', 'Unknown Product'))
+            
             # Check if this is one of our monitored tasting products
             if product_id in self.tasting_product_ids:
                 has_tasting_product = True
-                product_names.append(item.get('productTitle', item.get('productName', 'Unknown Product')))
+                tasting_product_names.append(product_name)
+            
+            # Check if this item belongs to the monitored collection
+            if self.collection_id in item.get('collectionIds', []):
+                has_collection_product = True
+                collection_product_names.append(product_name)
         
-        if not has_tasting_product:
+        # Determine alert type and trigger condition
+        alert_type = None
+        product_names = []
+        
+        # Condition 1: Tasting products
+        if has_tasting_product:
+            alert_type = 'tasting'
+            product_names = tasting_product_names
+        
+        # Condition 2: Collection products + at least 2 other products (total quantity >= 3)
+        elif has_collection_product and total_quantity >= 3:
+            alert_type = 'collection_order'
+            product_names = collection_product_names
+        
+        # No alert conditions met
+        if not alert_type:
             return None
         
         # This order needs an alert
+        customer = order.get('customer')
+        sales_associate = order.get('salesAssociate')
+        
         alert_info = {
             'order_number': order.get('orderNumber', 'Unknown'),
-            'associate_name': order.get('salesAssociate', {}).get('name', 'Unknown Associate'),
+            'associate_name': sales_associate.get('name', 'Unknown Associate') if sales_associate else 'Unknown Associate',
             'order_date': order.get('orderPaidDate') or order.get('orderDate', 'Unknown'),
-            'customer_name': order.get('customer', {}).get('name', 'Unknown Customer'),
+            'customer_name': customer.get('name', 'Unknown Customer') if customer else 'Unknown Customer',
             'total_amount': order.get('totalAmount', 0) / 100,  # Convert from cents
-            'products': product_names
+            'products': product_names,
+            'alert_type': alert_type
         }
         
-        logger.warning(f"Missing guest count for order {alert_info['order_number']} by {alert_info['associate_name']}")
+        logger.warning(f"Missing guest count for order {alert_info['order_number']} by {alert_info['associate_name']} - Alert type: {alert_type}")
         return alert_info
     
     def send_email_alert(self, alert_info: Dict) -> bool:
@@ -280,8 +320,22 @@ class GuestCountChecker:
         
         subject = f"Missing Guest Count Alert - Order {alert_info['order_number']}"
         
+        # Customize the first line based on alert type
+        alert_type = alert_info.get('alert_type', 'tasting')
+        
+        if alert_type == 'tasting':
+            first_line = f"{alert_info['associate_name']} just completed a tasting without a guest count."
+            reminder_line = "Please remind them to input guest count data for all tasting orders."
+        elif alert_type == 'collection_order':
+            first_line = f"{alert_info['associate_name']} just submitted an order without a guest count."
+            reminder_line = "Please remind them to input guest count data for all orders."
+        else:
+            # Fallback to tasting message for unknown types
+            first_line = f"{alert_info['associate_name']} just completed a tasting without a guest count."
+            reminder_line = "Please remind them to input guest count data for all tasting orders."
+        
         body = f"""
-        {alert_info['associate_name']} just completed a tasting without a guest count.
+        {first_line}
         
         Order Details:
         • Order Number: {alert_info['order_number']}
@@ -290,7 +344,7 @@ class GuestCountChecker:
         • Total Amount: ${alert_info['total_amount']:.2f}
         • Products: {', '.join(alert_info['products'])}
         
-        Please remind them to input guest count data for all tasting orders.
+        {reminder_line}
         
         This is an automated alert from the Guest Count Check system.
         """
@@ -341,11 +395,28 @@ class GuestCountChecker:
             except:
                 formatted_date = 'just now'
             
-            message = (
-                f"{alert_info['associate_name']} just did a tasting without a guest count. "
-                f"Order #{alert_info['order_number']} occurred on {formatted_date}. "
-                f"Please remind them to input guest count data."
-            )
+            # Create different messages based on alert type
+            alert_type = alert_info.get('alert_type', 'tasting')
+            
+            if alert_type == 'tasting':
+                message = (
+                    f"{alert_info['associate_name']} just did a tasting without a guest count. "
+                    f"Order #{alert_info['order_number']} occurred on {formatted_date}. "
+                    f"Please remind them to input guest count data."
+                )
+            elif alert_type == 'collection_order':
+                message = (
+                    f"{alert_info['associate_name']} just submitted an order without a guest count. "
+                    f"Order #{alert_info['order_number']} occurred at {formatted_date}. "
+                    f"Please remind them to input guest count data."
+                )
+            else:
+                # Fallback to tasting message for unknown types
+                message = (
+                    f"{alert_info['associate_name']} just did a tasting without a guest count. "
+                    f"Order #{alert_info['order_number']} occurred on {formatted_date}. "
+                    f"Please remind them to input guest count data."
+                )
             
             # Initialize Twilio client
             client = Client(self.twilio_account_sid, self.twilio_auth_token)
@@ -432,24 +503,37 @@ class GuestCountChecker:
             logger.info(f"Checking order {order_number}:")
             logger.info(f"  - Guest Count: {guest_count}")
             logger.info(f"  - Sales Associate: {associate}")
-            logger.info(f"  - Items: {len(items)} items")
+            total_quantity = sum(item.get('quantity', 1) for item in items)
+            logger.info(f"  - Items: {len(items)} different products, {total_quantity} total quantity")
             
-            # Check each item for tasting products
+            # Check each item for tasting products and collection products
             tasting_products_found = []
+            collection_products_found = []
             for item in items:
                 product_id = item.get('productId', '')
                 product_name = item.get('productTitle', item.get('productName', 'Unknown'))
+                collection_ids = item.get('collectionIds', [])
                 
                 # Debug: Show all product details
                 logger.info(f"  - Product: {product_name}")
                 logger.info(f"    Product ID: {product_id}")
-                logger.info(f"    Monitored IDs: {self.tasting_product_ids}")
+                logger.info(f"    Collection IDs: {collection_ids}")
+                logger.info(f"    Monitored Tasting IDs: {self.tasting_product_ids}")
+                logger.info(f"    Monitored Collection ID: {self.collection_id}")
                 
                 if product_id in self.tasting_product_ids:
                     tasting_products_found.append(product_name)
                     logger.info(f"  - 🍷 Found tasting product: {product_name}")
+                elif self.collection_id in collection_ids:
+                    collection_products_found.append(product_name)
+                    logger.info(f"  - 🏢 Found collection product: {product_name}")
                 else:
-                    logger.info(f"  - Not a tasting product")
+                    logger.info(f"  - Not a monitored product")
+            
+            # Log collection product and total quantity for debugging
+            if collection_products_found:
+                logger.info(f"  - Collection products found: {len(collection_products_found)}")
+            logger.info(f"  - Total quantity in order: {total_quantity}")
             
             alert_info = self.check_order_for_alert(order)
             
@@ -460,14 +544,19 @@ class GuestCountChecker:
                 
                 if email_sent or sms_sent:
                     alerts_sent += 1
-                    logger.info(f"Alert sent for order {alert_info['order_number']}")
+                    alert_type = alert_info.get('alert_type', 'unknown')
+                    logger.info(f"Alert sent for order {alert_info['order_number']} - Alert type: {alert_type}")
             else:
                 if guest_count == 'MISSING' and tasting_products_found:
                     logger.warning(f"Order {order_number} has missing guest count and tasting products but no alert was sent!")
+                elif guest_count == 'MISSING' and collection_products_found and total_quantity >= 3:
+                    logger.warning(f"Order {order_number} has missing guest count, collection products, and {total_quantity} total quantity but no alert was sent!")
                 elif guest_count != 'MISSING':
                     logger.info(f"Order {order_number} has guest count ({guest_count}), no alert needed")
-                elif not tasting_products_found:
-                    logger.info(f"Order {order_number} has no tasting products, no alert needed")
+                elif not tasting_products_found and not collection_products_found:
+                    logger.info(f"Order {order_number} has no monitored products, no alert needed")
+                elif collection_products_found and total_quantity < 3:
+                    logger.info(f"Order {order_number} has collection products but only {total_quantity} total quantity (need 3+), no alert needed")
         
         logger.info(f"Check complete. {alerts_sent} alerts sent.")
 
