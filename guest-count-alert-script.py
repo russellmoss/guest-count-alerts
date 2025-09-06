@@ -383,7 +383,7 @@ class GuestCountChecker:
         # Check if we've already alerted about this order
         if order_number in alerted_orders:
             alert_time = alerted_orders[order_number]
-            logger.info(f"Order {order_number} already alerted about at {alert_time.isoformat()}, skipping")
+            logger.info(f"Order {order_number} already alerted about at {alert_time.isoformat()}, skipping duplicate alert")
             return None
         # Check if order has guest count products - return None if it does
         items = order.get('items', [])
@@ -710,8 +710,10 @@ class GuestCountChecker:
                     logger.info(f"Alert sent for order {alert_info['order_number']} - Alert type: {alert_type}")
                     
                     # Add this order to the alerted orders dict with current timestamp
+                    # Update both the current run dict and the main alerted_orders dict immediately
                     current_time = datetime.now(timezone.utc)
                     new_alerted_orders[alert_info['order_number']] = current_time
+                    alerted_orders[alert_info['order_number']] = current_time  # Update in real-time
             else:
                 if not has_guest_count and tasting_products_found:
                     logger.warning(f"Order {order_number} has missing guest count and tasting products but no alert was sent!")
@@ -728,7 +730,7 @@ class GuestCountChecker:
         
         # Save the updated alerted orders
         if new_alerted_orders:
-            alerted_orders.update(new_alerted_orders)
+            # alerted_orders already contains the new orders (updated in real-time above)
             self._save_alerted_orders(alerted_orders)
             logger.info(f"Added {len(new_alerted_orders)} new orders to alerted list")
         
