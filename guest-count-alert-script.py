@@ -10,6 +10,7 @@ import os
 import sys
 import json
 import smtplib
+import shutil
 from datetime import datetime, timedelta, timezone
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -215,6 +216,9 @@ class GuestCountChecker:
         """Load the dictionary of order numbers with timestamps that have already been alerted about"""
         try:
             if os.path.exists(self.alerted_orders_file):
+                file_size = os.path.getsize(self.alerted_orders_file)
+                logger.info(f"Found alerted orders file: {self.alerted_orders_file} ({file_size} bytes)")
+                
                 with open(self.alerted_orders_file, 'rb') as f:
                     alerted_orders = pickle.load(f)
                 
@@ -226,22 +230,81 @@ class GuestCountChecker:
                     logger.info(f"Migrated {len(alerted_orders)} orders from old format to new format")
                 
                 logger.info(f"Loaded {len(alerted_orders)} previously alerted orders")
+                
+                # Debug: Show some details about the loaded orders
+                if alerted_orders:
+                    current_time = datetime.now(timezone.utc)
+                    recent_orders = []
+                    old_orders = []
+                    for order_num, alert_time in alerted_orders.items():
+                        age_hours = (current_time - alert_time).total_seconds() / 3600
+                        if age_hours <= 48:
+                            recent_orders.append((order_num, age_hours))
+                        else:
+                            old_orders.append((order_num, age_hours))
+                    
+                    if recent_orders:
+                        logger.info(f"Recent alerted orders (≤48h): {[f'{order_num}({age:.1f}h)' for order_num, age in recent_orders[:5]]}")
+                    if old_orders:
+                        logger.info(f"Old alerted orders (>48h): {[f'{order_num}({age:.1f}h)' for order_num, age in old_orders[:5]]}")
+                
                 return alerted_orders
             else:
-                logger.info("No previously alerted orders found")
+                logger.info(f"No previously alerted orders file found: {self.alerted_orders_file}")
                 return {}
         except Exception as e:
-            logger.warning(f"Could not load alerted orders: {e}")
+            logger.error(f"❌ Could not load alerted orders: {e}")
+            # Try to load from backup if it exists
+            backup_file = f"{self.alerted_orders_file}.backup"
+            if os.path.exists(backup_file):
+                try:
+                    logger.info(f"Attempting to load from backup: {backup_file}")
+                    with open(backup_file, 'rb') as f:
+                        alerted_orders = pickle.load(f)
+                    logger.info(f"Successfully loaded {len(alerted_orders)} orders from backup")
+                    return alerted_orders
+                except Exception as backup_e:
+                    logger.error(f"Could not load from backup either: {backup_e}")
             return {}
     
     def _save_alerted_orders(self, alerted_orders: dict):
         """Save the dictionary of order numbers with timestamps that have been alerted about"""
         try:
+            # Create a backup of the existing file if it exists
+            if os.path.exists(self.alerted_orders_file):
+                backup_file = f"{self.alerted_orders_file}.backup"
+                shutil.copy2(self.alerted_orders_file, backup_file)
+                logger.info(f"Created backup of alerted orders file: {backup_file}")
+            
+            # Save the new data
             with open(self.alerted_orders_file, 'wb') as f:
                 pickle.dump(alerted_orders, f)
-            logger.info(f"Saved {len(alerted_orders)} alerted orders")
+            
+            # Verify the file was written correctly
+            if os.path.exists(self.alerted_orders_file):
+                file_size = os.path.getsize(self.alerted_orders_file)
+                logger.info(f"Saved {len(alerted_orders)} alerted orders to {self.alerted_orders_file} ({file_size} bytes)")
+                
+                # Test that we can read it back
+                with open(self.alerted_orders_file, 'rb') as f:
+                    test_data = pickle.load(f)
+                if len(test_data) == len(alerted_orders):
+                    logger.info("✅ Verified alerted orders file was saved correctly")
+                else:
+                    logger.error(f"❌ Alerted orders file verification failed: expected {len(alerted_orders)}, got {len(test_data)}")
+            else:
+                logger.error(f"❌ Alerted orders file was not created: {self.alerted_orders_file}")
+                
         except Exception as e:
-            logger.warning(f"Could not save alerted orders: {e}")
+            logger.error(f"❌ Could not save alerted orders: {e}")
+            # Try to restore from backup if it exists
+            backup_file = f"{self.alerted_orders_file}.backup"
+            if os.path.exists(backup_file):
+                try:
+                    shutil.copy2(backup_file, self.alerted_orders_file)
+                    logger.info(f"Restored alerted orders from backup: {backup_file}")
+                except Exception as restore_e:
+                    logger.error(f"Could not restore from backup: {restore_e}")
     
     def _cleanup_old_alerted_orders(self, alerted_orders: dict, max_age_hours: int = 48) -> dict:
         """
@@ -646,6 +709,11 @@ class GuestCountChecker:
         alerted_orders = self._load_alerted_orders()
         alerted_orders = self._cleanup_old_alerted_orders(alerted_orders)
         
+        # Debug: Show what orders we're about to process
+        order_numbers = [order.get('orderNumber', 'Unknown') for order in orders]
+        logger.info(f"Orders found in time window: {order_numbers}")
+        logger.info(f"Currently tracked alerted orders: {list(alerted_orders.keys())}")
+        
         # Filter out orders that have already been alerted about to prevent duplicate processing
         orders_to_process = []
         for order in orders:
@@ -653,7 +721,9 @@ class GuestCountChecker:
             if order_number not in alerted_orders:
                 orders_to_process.append(order)
             else:
-                logger.info(f"Skipping order {order_number} - already alerted about")
+                alert_time = alerted_orders[order_number]
+                age_hours = (datetime.now(timezone.utc) - alert_time).total_seconds() / 3600
+                logger.info(f"Skipping order {order_number} - already alerted about {age_hours:.1f} hours ago")
         
         logger.info(f"Processing {len(orders_to_process)} orders (filtered out {len(orders) - len(orders_to_process)} already alerted orders)")
         
@@ -748,6 +818,9 @@ class GuestCountChecker:
             # alerted_orders already contains the new orders (updated in real-time above)
             self._save_alerted_orders(alerted_orders)
             logger.info(f"Added {len(new_alerted_orders)} new orders to alerted list")
+            logger.info(f"New alerted orders: {list(new_alerted_orders.keys())}")
+        else:
+            logger.info("No new alerts sent, no new orders to add to alerted list")
         
         # Save the current run timestamp for next time
         current_time = datetime.now(timezone.utc)
@@ -756,6 +829,12 @@ class GuestCountChecker:
         # Also save alerted orders even if no new alerts were sent, to ensure cleanup is preserved
         if not new_alerted_orders and alerted_orders:
             self._save_alerted_orders(alerted_orders)
+            logger.info("Saved alerted orders to preserve cleanup (no new alerts)")
+        
+        # Final debug: Show the complete state
+        logger.info(f"Final state: {len(alerted_orders)} total alerted orders tracked")
+        if alerted_orders:
+            logger.info(f"All tracked orders: {list(alerted_orders.keys())}")
 
 
 def main():
