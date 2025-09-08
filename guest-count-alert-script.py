@@ -205,6 +205,10 @@ class GuestCountChecker:
             start_time = end_time - timedelta(minutes=15)
             logger.info("No previous run found, using 15-minute fallback window")
         
+        # Add a small buffer to prevent processing the exact same orders multiple times
+        # This ensures we don't process orders that were created at the exact same timestamp
+        start_time = start_time + timedelta(seconds=1)
+        
         return start_time, end_time
     
     def _load_alerted_orders(self) -> dict:
@@ -642,10 +646,21 @@ class GuestCountChecker:
         alerted_orders = self._load_alerted_orders()
         alerted_orders = self._cleanup_old_alerted_orders(alerted_orders)
         
+        # Filter out orders that have already been alerted about to prevent duplicate processing
+        orders_to_process = []
+        for order in orders:
+            order_number = order.get('orderNumber', 'Unknown')
+            if order_number not in alerted_orders:
+                orders_to_process.append(order)
+            else:
+                logger.info(f"Skipping order {order_number} - already alerted about")
+        
+        logger.info(f"Processing {len(orders_to_process)} orders (filtered out {len(orders) - len(orders_to_process)} already alerted orders)")
+        
         # Check each order
         alerts_sent = 0
         new_alerted_orders = {}
-        for order in orders:
+        for order in orders_to_process:
             # Debug: Show details about each order found
             order_number = order.get('orderNumber', 'Unknown')
             associate = order.get('salesAssociate', {}).get('name', 'Unknown')
@@ -728,7 +743,7 @@ class GuestCountChecker:
         
         logger.info(f"Check complete. {alerts_sent} alerts sent.")
         
-        # Save the updated alerted orders
+        # Save the updated alerted orders immediately
         if new_alerted_orders:
             # alerted_orders already contains the new orders (updated in real-time above)
             self._save_alerted_orders(alerted_orders)
@@ -737,6 +752,10 @@ class GuestCountChecker:
         # Save the current run timestamp for next time
         current_time = datetime.now(timezone.utc)
         self._save_last_run_timestamp(current_time)
+        
+        # Also save alerted orders even if no new alerts were sent, to ensure cleanup is preserved
+        if not new_alerted_orders and alerted_orders:
+            self._save_alerted_orders(alerted_orders)
 
 
 def main():
