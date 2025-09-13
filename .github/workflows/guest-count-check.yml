@@ -36,15 +36,14 @@ jobs:
       uses: actions/cache@v3
       with:
         path: |
-          alerted_orders.pkl
-          alerted_orders.pkl.backup
-          last_run_timestamp.pkl
+          *.pkl
         key: guest-count-data-${{ runner.os }}-${{ github.run_number }}
         restore-keys: |
           guest-count-data-${{ runner.os }}-
     
     - name: Run guest count check
       env:
+        SCRIPT_ENABLED: ${{ secrets.SCRIPT_ENABLED }}
         C7_APP_ID: ${{ secrets.C7_APP_ID }}
         C7_API_KEY: ${{ secrets.C7_API_KEY }}
         C7_TENANT_ID: ${{ secrets.C7_TENANT_ID }}

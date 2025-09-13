@@ -39,6 +39,9 @@ class GuestCountChecker:
     """Check Commerce7 orders for missing guest counts and send alerts"""
     
     def __init__(self):
+        # Script toggle - set to False to disable the script
+        self.script_enabled = os.getenv('SCRIPT_ENABLED', 'true').lower() in ('true', '1', 'yes', 'on')
+        
         # Commerce7 credentials
         self.c7_app_id = os.getenv('C7_APP_ID')
         self.c7_api_key = os.getenv('C7_API_KEY')
@@ -692,6 +695,14 @@ class GuestCountChecker:
         Main execution method
         """
         logger.info("Starting guest count check...")
+        
+        # Check if script is enabled
+        if not self.script_enabled:
+            logger.info("🚫 Script is DISABLED via SCRIPT_ENABLED environment variable")
+            logger.info("To enable: Set SCRIPT_ENABLED=true in GitHub Secrets or environment")
+            return
+        
+        logger.info("✅ Script is ENABLED - proceeding with checks...")
         
         # Test basic connection first
         if not self.test_api_connection():
